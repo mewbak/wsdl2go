@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -26,7 +25,7 @@ func LoadDefinition(t *testing.T, filename string, want error) *wsdl.Definitions
 
 	// replace CURRENT_DIR in wsdl with the current working directory
 	// - for testing file: schema
-	ba, _ := ioutil.ReadAll(f)
+	ba, _ := io.ReadAll(f)
 	pwd, _ := os.Getwd()
 	s := strings.Replace(string(ba), "CURRENT_DIR", pwd, 1)
 
@@ -87,7 +86,7 @@ func TestEncoder(t *testing.T) {
 		if tc.G == "" {
 			continue
 		}
-		want, err = ioutil.ReadFile(filepath.Join("testdata", tc.G))
+		want, err = os.ReadFile(filepath.Join("testdata", tc.G))
 		if err != nil {
 			t.Errorf("test %d: missing golden file %q: %v", i, tc.G, err)
 		}
@@ -113,7 +112,7 @@ func Diff(prefix, ext string, a, b []byte) error {
 	}
 	for _, c := range cases {
 		defer os.Remove(c.File)
-		if err = ioutil.WriteFile(c.File, c.Data, 0600); err != nil {
+		if err = os.WriteFile(c.File, c.Data, 0600); err != nil {
 			return err
 		}
 	}

@@ -1,8 +1,8 @@
 # wsdl2go
 
-[![Build Status](https://travis-ci.org/fiorix/wsdl2go.svg)](https://travis-ci.org/fiorix/wsdl2go)
+[![CI](https://github.com/fiorix/wsdl2go/actions/workflows/ci.yml/badge.svg)](https://github.com/fiorix/wsdl2go/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/fiorix/wsdl2go)](https://goreportcard.com/report/github.com/fiorix/wsdl2go)
-[![GoDoc](https://godoc.org/github.com/fiorix/wsdl2go?status.svg)](https://godoc.org/github.com/fiorix/wsdl2go)
+[![Go Reference](https://pkg.go.dev/badge/github.com/fiorix/wsdl2go.svg)](https://pkg.go.dev/github.com/fiorix/wsdl2go)
 
 wsdl2go is a command line tool to generate [Go](https://golang.org) code
 from [WSDL](https://en.wikipedia.org/wiki/Web_Services_Description_Language).
@@ -10,7 +10,7 @@ from [WSDL](https://en.wikipedia.org/wiki/Web_Services_Description_Language).
 Download:
 
 ```
-go get github.com/fiorix/wsdl2go
+go install github.com/fiorix/wsdl2go@latest
 ```
 
 ### Usage
@@ -18,7 +18,7 @@ go get github.com/fiorix/wsdl2go
 tl;dr
 
 ```
-wsdl2go < file.wsdl > hello.go
+wsdl2go -i file.wsdl -o hello.go
 ```
 
 wsdl2go is a code generator that consumes WSDL from stdin (or file, or URL) and produces Go on stdout. The generated code contains services and methods described in the WSDL input, in a single output file. It is your responsibility to make it a package, in the sense that you put it in a directory that makes sense for you, and import it in your code later. Note that the generated code depends on the "soap" package that is part of this project.

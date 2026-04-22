@@ -14,7 +14,7 @@ const (
 type BindingPackageName wsdl.Binding
 
 func (p BindingPackageName) String() string {
-	packageName := strings.Replace(strings.ToLower(p.Name), ".", "", -1)
+	packageName := strings.NewReplacer(".", "", "-", "_").Replace(strings.ToLower(p.Name))
 	if packageName == "" {
 		packageName = fallbackPackageName
 	}

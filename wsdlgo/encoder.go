@@ -13,7 +13,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
-	"log"
+
 	"net/http"
 	"net/url"
 	"os"
@@ -187,7 +187,7 @@ func (ge *goEncoder) Encode(d *wsdl.Definitions) error {
 			fmt.Fprintf(&x, "gofmt stderr:\n%s\n", errb.String())
 		}
 		fmt.Fprintf(&x, "generated code:\n%s\n", input)
-		return fmt.Errorf(x.String())
+		return fmt.Errorf("%s", x.String())
 	}
 	return nil
 }
@@ -547,7 +547,7 @@ func (ge *goEncoder) writePortType(w io.Writer, d *wsdl.Definitions) error {
 		Name      string
 		Interface string
 	}{
-		strings.ToLower(n)[:1] + n[1:],
+		unexported(n),
 		goSymbol(n),
 	})
 }
@@ -743,7 +743,7 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 	if len(out) > 0 && op.Output != nil {
 		operationOutputDataType = ge.sanitizedOperationsType(ge.messages[trimns(op.Output.Message)].Name)
 	} else if rpcStyle {
-		operationInputDataType = "struct{}"
+		operationOutputDataType = "struct{}"
 	}
 
 	soapFunctionName := "RoundTripSoap12"
@@ -775,7 +775,7 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 		}{
 			soapFunctionName,
 			soapAction,
-			strings.ToLower(d.PortType.Name[:1]) + d.PortType.Name[1:],
+			unexported(d.PortType.Name),
 			goSymbol(op.Name),
 			namespacedOpName,
 			operationInputDataType,
@@ -806,7 +806,7 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 		RetDef             string
 		RPCStyle           bool
 	}{
-		strings.ToLower(d.PortType.Name[:1]) + d.PortType.Name[1:],
+		unexported(d.PortType.Name),
 		goSymbol(op.Name),
 		namespacedOpName,
 		operationInputDataType,
@@ -1281,9 +1281,21 @@ func goSymbol(s string) string {
 	v := invalidGoSymbol.ReplaceAllString(trimns(s), " ")
 	var name string
 	for _, part := range strings.Split(v, " ") {
-		name += strings.Title(part)
+		if part == "" {
+			continue
+		}
+		name += strings.ToUpper(part[:1]) + part[1:]
 	}
 	return name
+}
+
+// unexported returns an unexported Go name: lowercase first char, strip invalid chars.
+func unexported(s string) string {
+	s = strings.ReplaceAll(s, "-", "")
+	if s == "" {
+		return s
+	}
+	return strings.ToLower(s[:1]) + s[1:]
 }
 
 func trimns(s string) string {
@@ -1368,10 +1380,14 @@ func (ge *goEncoder) genGoStruct(w io.Writer, d *wsdl.Definitions, ct *wsdl.Comp
 func (ge *goEncoder) genGoOpStruct(w io.Writer, d *wsdl.Definitions, bo *wsdl.BindingOperation) error {
 	name := goSymbol(bo.Name)
 	function := ge.funcs[name]
+	if function == nil {
+		function = ge.funcs[bo.Name]
+	}
+	if function == nil {
+		return nil
+	}
 
-	if function.Input == nil {
-		log.Printf("function input is nil! %v is %v", name, function)
-	} else {
+	if function.Input != nil {
 		message := trimns(function.Input.Message)
 		inputMessage := ge.messages[message]
 
@@ -1382,11 +1398,8 @@ func (ge *goEncoder) genGoOpStruct(w io.Writer, d *wsdl.Definitions, bo *wsdl.Bi
 		}
 	}
 
-	if function.Output == nil {
-		log.Printf("function output is nil! %v is %v", name, function)
-	} else {
-		// Output messages are always required
-		ge.genOpStructMessage(w, d, name, ge.messages[trimns(ge.funcs[bo.Name].Output.Message)])
+	if function.Output != nil {
+		ge.genOpStructMessage(w, d, name, ge.messages[trimns(function.Output.Message)])
 	}
 
 	return nil
@@ -1625,14 +1638,16 @@ func (ge *goEncoder) genAttributeField(w io.Writer, attr *wsdl.Attribute) {
 		attr.Type = "string"
 	}
 
-	tag := fmt.Sprintf("%s,attr", attr.Name)
+	xmlTag := fmt.Sprintf("%s,attr", attr.Name)
+	jsonTag := attr.Name
 	fmt.Fprintf(w, "%s ", goSymbol(attr.Name))
 	typ := ge.wsdl2goType(attr.Type)
 	if attr.Nillable || attr.Min == 0 {
-		tag += ",omitempty"
+		xmlTag += ",omitempty"
+		jsonTag += ",omitempty"
 	}
 	fmt.Fprintf(w, "%s `xml:\"%s\" json:\"%s\" yaml:\"%s\"`\n",
-		typ, tag, tag, tag)
+		typ, xmlTag, jsonTag, jsonTag)
 }
 
 // writeComments writes comments to w, capped at ~80 columns.
