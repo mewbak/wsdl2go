@@ -3,6 +3,8 @@
 package stockquotesoapbinding
 
 import (
+	"context"
+
 	"github.com/fiorix/wsdl2go/soap"
 )
 
@@ -19,12 +21,18 @@ func NewStockQuotePortType(cli *soap.Client) StockQuotePortType {
 type StockQuotePortType interface {
 	// DestroySession was auto-generated from WSDL.
 	DestroySession(DestroySessionRequest *DestroySessionRequest) (*DestroySessionResponse, error)
+	// DestroySession was auto-generated from WSDL.
+	DestroySessionContext(ctx context.Context, DestroySessionRequest *DestroySessionRequest) (*DestroySessionResponse, error)
 
 	// GetLastTradePrice was auto-generated from WSDL.
 	GetLastTradePrice(TradePriceRequest *TradePriceRequest) (*TradePrice, error)
+	// GetLastTradePrice was auto-generated from WSDL.
+	GetLastTradePriceContext(ctx context.Context, TradePriceRequest *TradePriceRequest) (*TradePrice, error)
 
 	// GetSession was auto-generated from WSDL.
 	GetSession(GetSessionRequest *GetSessionRequest) (*GetSessionResponse, error)
+	// GetSession was auto-generated from WSDL.
+	GetSessionContext(ctx context.Context, GetSessionRequest *GetSessionRequest) (*GetSessionResponse, error)
 }
 
 // DestroySessionRequest was auto-generated from WSDL.
@@ -98,6 +106,10 @@ type stockQuotePortType struct {
 
 // DestroySession was auto-generated from WSDL.
 func (p *stockQuotePortType) DestroySession(DestroySessionRequest *DestroySessionRequest) (*DestroySessionResponse, error) {
+	return p.DestroySessionContext(context.Background(), DestroySessionRequest)
+}
+
+func (p *stockQuotePortType) DestroySessionContext(ctx context.Context, DestroySessionRequest *DestroySessionRequest) (*DestroySessionResponse, error) {
 	α := struct {
 		OperationDestroySessionInput `xml:"tns:DestroySession"`
 	}{
@@ -109,7 +121,7 @@ func (p *stockQuotePortType) DestroySession(DestroySessionRequest *DestroySessio
 	γ := struct {
 		OperationDestroySessionOutput `xml:"DestroySessionResponse"`
 	}{}
-	if err := p.cli.RoundTripWithAction("http://example.com/DestroySession", α, &γ); err != nil {
+	if err := p.cli.RoundTripWithActionContext(ctx, "http://example.com/DestroySession", α, &γ); err != nil {
 		return nil, err
 	}
 	return γ.DestroySessionResponse, nil
@@ -117,6 +129,10 @@ func (p *stockQuotePortType) DestroySession(DestroySessionRequest *DestroySessio
 
 // GetLastTradePrice was auto-generated from WSDL.
 func (p *stockQuotePortType) GetLastTradePrice(TradePriceRequest *TradePriceRequest) (*TradePrice, error) {
+	return p.GetLastTradePriceContext(context.Background(), TradePriceRequest)
+}
+
+func (p *stockQuotePortType) GetLastTradePriceContext(ctx context.Context, TradePriceRequest *TradePriceRequest) (*TradePrice, error) {
 	α := struct {
 		OperationGetLastTradePriceInput `xml:"tns:GetLastTradePrice"`
 	}{
@@ -128,7 +144,7 @@ func (p *stockQuotePortType) GetLastTradePrice(TradePriceRequest *TradePriceRequ
 	γ := struct {
 		OperationGetLastTradePriceOutput `xml:"GetLastTradePriceResponse"`
 	}{}
-	if err := p.cli.RoundTripWithAction("http://example.com/GetLastTradePrice", α, &γ); err != nil {
+	if err := p.cli.RoundTripWithActionContext(ctx, "http://example.com/GetLastTradePrice", α, &γ); err != nil {
 		return nil, err
 	}
 	return γ.TradePrice, nil
@@ -136,6 +152,10 @@ func (p *stockQuotePortType) GetLastTradePrice(TradePriceRequest *TradePriceRequ
 
 // GetSession was auto-generated from WSDL.
 func (p *stockQuotePortType) GetSession(GetSessionRequest *GetSessionRequest) (*GetSessionResponse, error) {
+	return p.GetSessionContext(context.Background(), GetSessionRequest)
+}
+
+func (p *stockQuotePortType) GetSessionContext(ctx context.Context, GetSessionRequest *GetSessionRequest) (*GetSessionResponse, error) {
 	α := struct {
 		OperationGetSessionInput `xml:"tns:GetSession"`
 	}{
@@ -147,7 +167,7 @@ func (p *stockQuotePortType) GetSession(GetSessionRequest *GetSessionRequest) (*
 	γ := struct {
 		OperationGetSessionOutput `xml:"GetSessionResponse"`
 	}{}
-	if err := p.cli.RoundTripWithAction("http://example.com/GetSession", α, &γ); err != nil {
+	if err := p.cli.RoundTripWithActionContext(ctx, "http://example.com/GetSession", α, &γ); err != nil {
 		return nil, err
 	}
 	return γ.GetSessionResponse, nil

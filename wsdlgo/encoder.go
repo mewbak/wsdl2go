@@ -8,6 +8,8 @@ package wsdlgo
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"fmt"
 	"go/parser"
@@ -47,6 +49,10 @@ type Encoder interface {
 	// SetLocalNamespace allows overriding of the Namespace in XMLName instead
 	// of the one specified in wsdl
 	SetLocalNamespace(namespace string)
+
+	// SetCacheDir sets the directory for caching downloaded schemas.
+	// An empty string disables caching.
+	SetCacheDir(dir string)
 }
 
 type goEncoder struct {
@@ -76,12 +82,7 @@ type goEncoder struct {
 	// soap operations cache
 	soapOps map[string]*wsdl.BindingOperation
 
-	// whether to add supporting types
-	needsDateType     bool
-	needsTimeType     bool
-	needsDateTimeType bool
-	needsDurationType bool
-	needsTag          map[string]string
+	needsTag map[string]string
 	needsStdPkg       map[string]bool
 	needsExtPkg       map[string]bool
 	importedSchemas   map[string]bool
@@ -89,6 +90,9 @@ type goEncoder struct {
 
 	// localNamespace allows overriding of namespace in XMLName
 	localNamespace string
+
+	// cacheDir is the directory for caching downloaded schemas
+	cacheDir string
 }
 
 // NewEncoder creates and initializes an Encoder that generates code to w.
@@ -117,6 +121,10 @@ func (ge *goEncoder) SetClient(c *http.Client) {
 	ge.http = c
 }
 
+func (ge *goEncoder) SetCacheDir(dir string) {
+	ge.cacheDir = dir
+}
+
 func gofmtPath() (string, error) {
 	goroot := os.Getenv("GOROOT")
 	if goroot != "" {
@@ -142,7 +150,11 @@ func (ge *goEncoder) Encode(d *wsdl.Definitions) error {
 
 	// default mechanism to set package name
 	if ge.packageName == nil {
-		ge.packageName = BindingPackageName(d.Binding)
+		if len(d.Bindings) > 0 {
+			ge.packageName = BindingPackageName(d.Bindings[0])
+		} else {
+			ge.packageName = PackageName(fallbackPackageName)
+		}
 	}
 
 	var b bytes.Buffer
@@ -200,30 +212,62 @@ func (ge *goEncoder) encode(w io.Writer, d *wsdl.Definitions) error {
 		return fmt.Errorf("wsdl import: %v", err)
 	}
 	ge.cacheTypes(d)
-	ge.cacheFuncs(d)
 	ge.cacheMessages(d)
-	ge.cacheSOAPOperations(d)
 
 	var b bytes.Buffer
-	var ff []func(io.Writer, *wsdl.Definitions) error
-	if len(ge.soapOps) > 0 {
-		ff = append(ff,
-			ge.writeInterfaceFuncs,
-			ge.writeGoTypes,
-			ge.writePortType,
-			ge.writeGoFuncs,
-		)
-	} else {
-		// TODO: probably faulty wsdl?
-		ff = append(ff,
-			ge.writeGoFuncs,
-			ge.writeGoTypes,
-		)
+
+	// Process each PortType with its matching Binding.
+	for i := range d.PortTypes {
+		pt := &d.PortTypes[i]
+		binding := ge.findBinding(d, pt.Name)
+
+		// Reset per-portType caches.
+		ge.funcs = make(map[string]*wsdl.Operation)
+		ge.funcnames = nil
+		ge.soapOps = make(map[string]*wsdl.BindingOperation)
+
+		ge.cacheFuncsForPortType(pt)
+		if binding != nil {
+			ge.cacheSOAPOperationsForBinding(binding)
+		}
+
+		if len(ge.soapOps) > 0 {
+			if err := ge.writeInterfaceFuncs(&b, d, pt); err != nil {
+				return err
+			}
+		}
 	}
-	for _, f := range ff {
-		err := f(&b, d)
-		if err != nil {
-			return err
+
+	// Types are shared across all PortTypes.
+	if err := ge.writeGoTypes(&b, d); err != nil {
+		return err
+	}
+
+	// Write impl struct + methods per PortType.
+	for i := range d.PortTypes {
+		pt := &d.PortTypes[i]
+		binding := ge.findBinding(d, pt.Name)
+
+		ge.funcs = make(map[string]*wsdl.Operation)
+		ge.funcnames = nil
+		ge.soapOps = make(map[string]*wsdl.BindingOperation)
+
+		ge.cacheFuncsForPortType(pt)
+		if binding != nil {
+			ge.cacheSOAPOperationsForBinding(binding)
+		}
+
+		if len(ge.soapOps) > 0 {
+			if err := ge.writePortType(&b, d, pt); err != nil {
+				return err
+			}
+			if err := ge.writeGoFuncs(&b, d, pt, binding); err != nil {
+				return err
+			}
+		} else {
+			if err := ge.writeGoFuncs(&b, d, pt, binding); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -244,6 +288,21 @@ func (ge *goEncoder) encode(w io.Writer, d *wsdl.Definitions) error {
 	}
 	_, err = io.Copy(w, &b)
 	return err
+}
+
+// findBinding returns the Binding that references the given PortType name.
+func (ge *goEncoder) findBinding(d *wsdl.Definitions, portTypeName string) *wsdl.Binding {
+	for i := range d.Bindings {
+		b := &d.Bindings[i]
+		if trimns(b.Type) == portTypeName {
+			return b
+		}
+	}
+	// Fallback: return first binding if only one exists.
+	if len(d.Bindings) == 1 {
+		return &d.Bindings[0]
+	}
+	return nil
 }
 
 func (ge *goEncoder) importParts(d *wsdl.Definitions) error {
@@ -328,13 +387,23 @@ func (ge *goEncoder) importRemote(loc string, v interface{}) error {
 	var r io.Reader
 	switch u.Scheme {
 	case "http", "https":
-		resp, err := ge.http.Get(loc)
-		if err != nil {
-			return err
+		if data, ok := ge.readCache(loc); ok {
+			ge.importedSchemas[loc] = true
+			r = bytes.NewReader(data)
+		} else {
+			resp, err := ge.http.Get(loc)
+			if err != nil {
+				return err
+			}
+			ge.importedSchemas[loc] = true
+			defer resp.Body.Close()
+			data, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return err
+			}
+			ge.writeCache(loc, data)
+			r = bytes.NewReader(data)
 		}
-		ge.importedSchemas[loc] = true
-		defer resp.Body.Close()
-		r = resp.Body
 	default:
 		file, err := os.Open(u.Path)
 		if err != nil {
@@ -346,7 +415,30 @@ func (ge *goEncoder) importRemote(loc string, v interface{}) error {
 	decoder := xml.NewDecoder(r)
 	decoder.CharsetReader = charset.NewReaderLabel
 	return decoder.Decode(&v)
+}
 
+func (ge *goEncoder) cacheFilePath(loc string) string {
+	h := sha256.Sum256([]byte(loc))
+	return filepath.Join(ge.cacheDir, hex.EncodeToString(h[:]))
+}
+
+func (ge *goEncoder) readCache(loc string) ([]byte, bool) {
+	if ge.cacheDir == "" {
+		return nil, false
+	}
+	data, err := os.ReadFile(ge.cacheFilePath(loc))
+	if err != nil {
+		return nil, false
+	}
+	return data, true
+}
+
+func (ge *goEncoder) writeCache(loc string, data []byte) {
+	if ge.cacheDir == "" {
+		return
+	}
+	os.MkdirAll(ge.cacheDir, 0o755)
+	os.WriteFile(ge.cacheFilePath(loc), data, 0o644)
 }
 
 func (ge *goEncoder) cacheTypes(d *wsdl.Definitions) {
@@ -442,9 +534,8 @@ func (ge *goEncoder) cacheElements(ct []*wsdl.Element) {
 	}
 }
 
-func (ge *goEncoder) cacheFuncs(d *wsdl.Definitions) {
-	// operations are declared as boilerplate go functions
-	for _, v := range d.PortType.Operations {
+func (ge *goEncoder) cacheFuncsForPortType(pt *wsdl.PortType) {
+	for _, v := range pt.Operations {
 		ge.funcs[v.Name] = v
 	}
 	ge.funcnames = make([]string, len(ge.funcs))
@@ -462,8 +553,8 @@ func (ge *goEncoder) cacheMessages(d *wsdl.Definitions) {
 	}
 }
 
-func (ge *goEncoder) cacheSOAPOperations(d *wsdl.Definitions) {
-	for _, v := range d.Binding.Operations {
+func (ge *goEncoder) cacheSOAPOperationsForBinding(b *wsdl.Binding) {
+	for _, v := range b.Operations {
 		ge.soapOps[v.Name] = v
 	}
 }
@@ -479,15 +570,16 @@ func New{{.Name}}(cli *soap.Client) {{.Name}} {
 type {{.Name}} interface {
 {{- range .Funcs }}
 {{.Doc}}{{.Name}}({{.Input}}) ({{.Output}})
+{{.Doc}}{{.Name}}Context({{.CtxInput}}) ({{.Output}})
 {{ end }}
 }
 `))
 
-type interfaceTypeFunc struct{ Doc, Name, Input, Output string }
+type interfaceTypeFunc struct{ Doc, Name, Input, CtxInput, Output string }
 
 // writeInterfaceFuncs writes Go interface definitions from WSDL types to w.
 // Functions are written in the same order of the WSDL document.
-func (ge *goEncoder) writeInterfaceFuncs(w io.Writer, d *wsdl.Definitions) error {
+func (ge *goEncoder) writeInterfaceFuncs(w io.Writer, d *wsdl.Definitions, pt *wsdl.PortType) error {
 	funcs := make([]*interfaceTypeFunc, len(ge.funcs))
 	// Looping over the operations to determine what are the interface
 	// functions.
@@ -510,15 +602,22 @@ func (ge *goEncoder) writeInterfaceFuncs(w io.Writer, d *wsdl.Definitions) error
 		name := goSymbol(op.Name)
 		var doc bytes.Buffer
 		ge.writeComments(&doc, name, op.Doc)
+		inputStr := strings.Join(in, ",")
+		ctxInput := "ctx context.Context"
+		if inputStr != "" {
+			ctxInput += "," + inputStr
+		}
+		ge.needsStdPkg["context"] = true
 		funcs[i] = &interfaceTypeFunc{
-			Doc:    doc.String(),
-			Name:   name,
-			Input:  strings.Join(in, ","),
-			Output: strings.Join(out, ","),
+			Doc:      doc.String(),
+			Name:     name,
+			Input:    inputStr,
+			CtxInput: ctxInput,
+			Output:   strings.Join(out, ","),
 		}
 		i++
 	}
-	n := d.PortType.Name
+	n := pt.Name
 	return interfaceTypeT.Execute(w, &struct {
 		Name  string
 		Impl  string // private type that implements the interface
@@ -538,11 +637,11 @@ type {{.Name}} struct {
 
 `))
 
-func (ge *goEncoder) writePortType(w io.Writer, d *wsdl.Definitions) error {
+func (ge *goEncoder) writePortType(w io.Writer, d *wsdl.Definitions, pt *wsdl.PortType) error {
 	if len(ge.funcs) == 0 {
 		return nil
 	}
-	n := d.PortType.Name
+	n := pt.Name
 	return portTypeT.Execute(w, &struct {
 		Name      string
 		Interface string
@@ -554,15 +653,7 @@ func (ge *goEncoder) writePortType(w io.Writer, d *wsdl.Definitions) error {
 
 // writeGoFuncs writes Go function definitions from WSDL types to w.
 // Functions are written in the same order of the WSDL document.
-func (ge *goEncoder) writeGoFuncs(w io.Writer, d *wsdl.Definitions) error {
-	if d.Binding.Type != "" {
-		a, b := trimns(d.Binding.Type), trimns(d.PortType.Name)
-		if a != b {
-			return fmt.Errorf(
-				"binding %q requires port type %q but it's not defined",
-				d.Binding.Name, d.Binding.Type)
-		}
-	}
+func (ge *goEncoder) writeGoFuncs(w io.Writer, d *wsdl.Definitions, pt *wsdl.PortType, binding *wsdl.Binding) error {
 	if len(ge.funcs) == 0 {
 		return nil
 	}
@@ -578,7 +669,7 @@ func (ge *goEncoder) writeGoFuncs(w io.Writer, d *wsdl.Definitions) error {
 			return err
 		}
 
-		ok := ge.writeSOAPFunc(w, d, op, inParams, outParams)
+		ok := ge.writeSOAPFunc(w, d, pt, binding, op, inParams, outParams)
 		if !ok {
 			in, out := code(inParams), codeParams(outParams)
 			ret := make([]string, len(out))
@@ -604,6 +695,10 @@ func (ge *goEncoder) writeGoFuncs(w io.Writer, d *wsdl.Definitions) error {
 
 var soapFuncT = template.Must(template.New("soapFunc").Parse(
 	`func (p *{{.PortType}}) {{.Name}}({{.Input}}) ({{.Output}}) {
+	return p.{{.Name}}Context(context.Background(){{if .Input}},{{end}}{{.InputPassthrough}})
+}
+
+func (p *{{.PortType}}) {{.Name}}Context({{.CtxInput}}) ({{.Output}}) {
 	α := struct {
 		{{if .OpInputDataType}}
 			{{if .RPCStyle}}M{{end}} {{.OpInputDataType}} ` + "`xml:\"{{.OpName}}\"`" + `
@@ -620,7 +715,7 @@ var soapFuncT = template.Must(template.New("soapFunc").Parse(
 			{{if .RPCStyle}}M {{end}}{{.OpResponseDataType}} ` + "`xml:\"{{.OpResponseName}}\"`" + `
 		{{end}}
 	}{}
-	if err := p.cli.RoundTripWithAction("{{.Name}}", α, &γ); err != nil {
+	if err := p.cli.RoundTripWithActionContext(ctx, "{{.Name}}", α, &γ); err != nil {
 		return {{.RetDef}}
 	}
 	return {{range $index, $element := .OpOutputNames}}{{index $.OpOutputPrefixes $index}}γ.{{if $.RPCStyle}}M.{{end}}{{$element}}, {{end}}nil
@@ -629,6 +724,10 @@ var soapFuncT = template.Must(template.New("soapFunc").Parse(
 
 var soapActionFuncT = template.Must(template.New("soapActionFunc").Parse(
 	`func (p *{{.PortType}}) {{.Name}}({{.Input}}) ({{.Output}}) {
+	return p.{{.Name}}Context(context.Background(){{if .Input}},{{end}}{{.InputPassthrough}})
+}
+
+func (p *{{.PortType}}) {{.Name}}Context({{.CtxInput}}) ({{.Output}}) {
 	α := struct {
 		{{if .OpInputDataType}}
 			{{if .RPCStyle}}M{{end}} {{.OpInputDataType}} ` + "`xml:\"{{.OpName}}\"`" + `
@@ -645,14 +744,14 @@ var soapActionFuncT = template.Must(template.New("soapActionFunc").Parse(
 			{{if .RPCStyle}}M {{end}}{{.OpResponseDataType}} ` + "`xml:\"{{.OpResponseName}}\"`" + `
 		{{end}}
 	}{}
-	if err := p.cli.{{.RoundTripType}}("{{.Action}}", α, &γ); err != nil {
+	if err := p.cli.{{.RoundTripType}}Context(ctx, "{{.Action}}", α, &γ); err != nil {
 		return {{.RetDef}}
 	}
 	return {{range $index, $element := .OpOutputNames}}{{index $.OpOutputPrefixes $index}}γ.{{if $.RPCStyle}}M.{{end}}{{$element}}, {{end}}nil
 }
 `))
 
-func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Operation, in, out []*parameter) bool {
+func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, pt *wsdl.PortType, binding *wsdl.Binding, op *wsdl.Operation, in, out []*parameter) bool {
 	if _, exists := ge.soapOps[op.Name]; !exists {
 		// TODO: probably faulty wsdl?
 		return false
@@ -661,8 +760,8 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 	// Do we need to wrap into a operation element?
 	rpcStyle := false
 
-	if d.Binding.BindingType != nil {
-		rpcStyle = d.Binding.BindingType.Style == "rpc"
+	if binding != nil && binding.BindingType != nil {
+		rpcStyle = binding.BindingType.Style == "rpc"
 	}
 
 	ge.needsExtPkg["github.com/fiorix/wsdl2go/soap"] = true
@@ -746,6 +845,16 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 		operationOutputDataType = "struct{}"
 	}
 
+	// Build context-aware input parameter strings.
+	inputStr := strings.Join(code(in), ",")
+	ctxInput := "ctx context.Context"
+	if inputStr != "" {
+		ctxInput += "," + inputStr
+	}
+	// InputPassthrough is the parameter names only (no types) for delegation.
+	inputPassthrough := strings.Join(codeNames(in), ",")
+	ge.needsStdPkg["context"] = true
+
 	soapFunctionName := "RoundTripSoap12"
 	soapAction := ""
 	if bindingOp, exists := ge.soapOps[op.Name]; exists {
@@ -769,13 +878,15 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 			OpOutputNames      []string
 			OpOutputPrefixes   []string
 			Input              string
+			CtxInput           string
+			InputPassthrough   string
 			Output             string
 			RetDef             string
 			RPCStyle           bool
 		}{
 			soapFunctionName,
 			soapAction,
-			unexported(d.PortType.Name),
+			unexported(pt.Name),
 			goSymbol(op.Name),
 			namespacedOpName,
 			operationInputDataType,
@@ -784,7 +895,9 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 			operationOutputDataType,
 			operationOutputNames,
 			operationOutputPrefixes,
-			strings.Join(code(in), ","),
+			inputStr,
+			ctxInput,
+			inputPassthrough,
 			strings.Join(outputDataTypes, ","),
 			strings.Join(retDefaults, ","),
 			rpcStyle,
@@ -802,11 +915,13 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 		OpOutputNames      []string
 		OpOutputPrefixes   []string
 		Input              string
+		CtxInput           string
+		InputPassthrough   string
 		Output             string
 		RetDef             string
 		RPCStyle           bool
 	}{
-		unexported(d.PortType.Name),
+		unexported(pt.Name),
 		goSymbol(op.Name),
 		namespacedOpName,
 		operationInputDataType,
@@ -815,7 +930,9 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 		operationOutputDataType,
 		operationOutputNames,
 		operationOutputPrefixes,
-		strings.Join(code(in), ","),
+		inputStr,
+		ctxInput,
+		inputPassthrough,
 		strings.Join(outputDataTypes, ","),
 		strings.Join(retDefaults, ","),
 		rpcStyle,
@@ -901,6 +1018,14 @@ func code(list []*parameter) []string {
 		code[i] = maskKeywordUsage(p.code) + " " + p.dataType
 	}
 	return code
+}
+
+func codeNames(list []*parameter) []string {
+	names := make([]string, len(list))
+	for i, p := range list {
+		names[i] = maskKeywordUsage(p.code)
+	}
+	return names
 }
 
 func codeParams(list []*parameter) []string {
@@ -1000,6 +1125,8 @@ func (ge *goEncoder) wsdl2goType(t string) string {
 	switch strings.ToLower(v) {
 	case "byte", "unsignedbyte":
 		return "byte"
+	case "short":
+		return "int16"
 	case "int":
 		return "int"
 	case "integer":
@@ -1015,11 +1142,11 @@ func (ge *goEncoder) wsdl2goType(t string) string {
 	case "string", "anyuri", "token", "nmtoken", "qname", "language", "id":
 		return "string"
 	case "date":
-		ge.needsDateType = true
-		return "Date"
+		ge.needsExtPkg["github.com/fiorix/wsdl2go/soap"] = true
+		return "soap.Date"
 	case "time":
-		ge.needsTimeType = true
-		return "Time"
+		ge.needsExtPkg["github.com/fiorix/wsdl2go/soap"] = true
+		return "soap.Time"
 	case "nonnegativeinteger":
 		return "uint"
 	case "positiveinteger":
@@ -1029,13 +1156,14 @@ func (ge *goEncoder) wsdl2goType(t string) string {
 	case "unsignedint":
 		return "uint"
 	case "datetime":
-		ge.needsDateTimeType = true
-		return "DateTime"
+		ge.needsExtPkg["github.com/fiorix/wsdl2go/soap"] = true
+		return "soap.DateTime"
 	case "duration":
-		ge.needsDurationType = true
-		return "Duration"
+		ge.needsExtPkg["github.com/fiorix/wsdl2go/soap"] = true
+		return "soap.Duration"
 	case "anysequence", "anytype", "anysimpletype":
-		return "interface{}"
+		ge.needsExtPkg["github.com/fiorix/wsdl2go/soap"] = true
+		return "*soap.AnyType"
 	default:
 		return "*" + goSymbol(v)
 	}
@@ -1052,12 +1180,20 @@ func (ge *goEncoder) wsdl2goDefault(t string) string {
 		return `errors.New("not implemented")`
 	case "bool":
 		return "false"
-	case "uint", "int", "int64", "float64":
+	case "uint", "int", "int16", "int64", "float64":
 		return "0"
 	case "string":
 		return `""`
 	case "[]byte", "interface{}":
 		return "nil"
+	case "soap.DateTime":
+		return "soap.DateTime{}"
+	case "soap.Date":
+		return "soap.Date{}"
+	case "soap.Time":
+		return "soap.Time{}"
+	case "soap.Duration":
+		return `""`
 	default:
 		return "&" + v + "{}"
 	}
@@ -1091,7 +1227,7 @@ func (ge *goEncoder) writeGoTypes(w io.Writer, d *wsdl.Definitions) error {
 		if st.Restriction != nil {
 			ge.writeComments(&b, stname, "")
 			fmt.Fprintf(&b, "type %s %s\n\n", stname, ge.wsdl2goType(st.Restriction.Base))
-			ge.genValidator(&b, stname, st.Restriction)
+			ge.genEnumConsts(&b, stname, st.Restriction)
 		} else if st.Union != nil {
 			types := strings.Split(st.Union.MemberTypes, " ")
 			ntypes := make([]string, len(types))
@@ -1127,7 +1263,6 @@ func (ge *goEncoder) writeGoTypes(w io.Writer, d *wsdl.Definitions) error {
 		}
 	}
 
-	ge.genDateTypes(w) // must be called last
 	_, err = io.Copy(w, &b)
 	return err
 }
@@ -1165,78 +1300,42 @@ func (ge *goEncoder) sortedOperations() []string {
 	return keys
 }
 
-func (ge *goEncoder) genDateTypes(w io.Writer) {
-	cases := []struct {
-		needs bool
-		name  string
-		code  string
-	}{
-		{
-			needs: ge.needsDateType,
-			name:  "Date",
-			code:  "type Date string\n\n",
-		},
-		{
-			needs: ge.needsTimeType,
-			name:  "Time",
-			code:  "type Time string\n\n",
-		},
-		{
-			needs: ge.needsDateTimeType,
-			name:  "DateTime",
-			code:  "type DateTime string\n\n",
-		},
-		{
-			needs: ge.needsDurationType,
-			name:  "Duration",
-			code:  "type Duration string\n\n",
-		},
-	}
-	for _, c := range cases {
-		if !c.needs {
-			continue
-		}
-		ge.writeComments(w, c.name, c.name+" in WSDL format.")
-		io.WriteString(w, c.code)
-	}
-}
 
-var validatorT = template.Must(template.New("validator").Parse(`
-// Validate validates {{.TypeName}}.
-func (v {{.TypeName}}) Validate() bool {
-	for _, vv := range []{{.Type}} {
-		{{range .Args}}{{.}},{{"\n"}}{{end}}
-	}{
-		if reflect.DeepEqual(v, vv) {
-			return true
-		}
-	}
-	return false
-}
+var enumConstsT = template.Must(template.New("enumConsts").Parse(`
+const (
+{{- range .Consts}}
+	{{.Name}} {{$.TypeName}} = {{.Value}}
+{{- end}}
+)
 `))
 
-func (ge *goEncoder) genValidator(w io.Writer, typeName string, r *wsdl.Restriction) {
+type enumConst struct {
+	Name  string
+	Value string
+}
+
+func (ge *goEncoder) genEnumConsts(w io.Writer, typeName string, r *wsdl.Restriction) {
 	if len(r.Enum) == 0 {
 		return
 	}
-	args := make([]string, len(r.Enum))
 	t := ge.wsdl2goType(r.Base)
+	consts := make([]enumConst, len(r.Enum))
 	for i, v := range r.Enum {
+		val := v.Value
 		if t == "string" {
-			args[i] = strconv.Quote(v.Value)
-		} else {
-			args[i] = v.Value
+			val = strconv.Quote(val)
+		}
+		consts[i] = enumConst{
+			Name:  typeName + goSymbol(v.Value),
+			Value: val,
 		}
 	}
-	ge.needsStdPkg["reflect"] = true
-	validatorT.Execute(w, &struct {
+	enumConstsT.Execute(w, &struct {
 		TypeName string
-		Type     string
-		Args     []string
+		Consts   []enumConst
 	}{
 		typeName,
-		t,
-		args,
+		consts,
 	})
 }
 

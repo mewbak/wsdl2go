@@ -3,6 +3,8 @@
 package stockquotesoapbinding
 
 import (
+	"context"
+
 	"github.com/fiorix/wsdl2go/soap"
 )
 
@@ -19,6 +21,8 @@ func NewStockQuotePortType(cli *soap.Client) StockQuotePortType {
 type StockQuotePortType interface {
 	// GetTradePrices was auto-generated from WSDL.
 	GetTradePrices(String string) (*ArrayOfFloat, error)
+	// GetTradePrices was auto-generated from WSDL.
+	GetTradePricesContext(ctx context.Context, String string) (*ArrayOfFloat, error)
 }
 
 // ArrayOfFloat was auto-generated from WSDL.
@@ -45,6 +49,10 @@ type stockQuotePortType struct {
 
 // GetTradePrices was auto-generated from WSDL.
 func (p *stockQuotePortType) GetTradePrices(String string) (*ArrayOfFloat, error) {
+	return p.GetTradePricesContext(context.Background(), String)
+}
+
+func (p *stockQuotePortType) GetTradePricesContext(ctx context.Context, String string) (*ArrayOfFloat, error) {
 	α := struct {
 		M OperationGetTradePricesInput `xml:"tns:GetTradePrices"`
 	}{
@@ -56,7 +64,7 @@ func (p *stockQuotePortType) GetTradePrices(String string) (*ArrayOfFloat, error
 	γ := struct {
 		M OperationGetTradePricesOutput `xml:"GetTradePricesResponse"`
 	}{}
-	if err := p.cli.RoundTripWithAction("http://example.com/GetTradePrices", α, &γ); err != nil {
+	if err := p.cli.RoundTripWithActionContext(ctx, "http://example.com/GetTradePrices", α, &γ); err != nil {
 		return nil, err
 	}
 	return γ.M.Result, nil

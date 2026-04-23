@@ -16,8 +16,8 @@ type Definitions struct {
 	Imports         []*Import         `xml:"import"`
 	Schema          Schema            `xml:"types>schema"`
 	Messages        []*Message        `xml:"message"`
-	PortType        PortType          `xml:"portType"` // TODO: PortType slice?
-	Binding         Binding           `xml:"binding"`
+	PortTypes       []PortType        `xml:"portType"`
+	Bindings        []Binding         `xml:"binding"`
 }
 
 type definitionDup Definitions
@@ -255,6 +255,7 @@ type Operation struct {
 	Doc     string   `xml:"documentation"`
 	Input   *IO      `xml:"input"`
 	Output  *IO      `xml:"output"`
+	Faults  []*IO    `xml:"fault"`
 }
 
 // IO describes which message is linked to an operation, for input
@@ -288,6 +289,13 @@ type BindingOperation struct {
 	Operation11 SOAP11Operation `xml:"http://schemas.xmlsoap.org/wsdl/soap/ operation"`
 	Input       *BindingIO      `xml:"input>body"`
 	Output      *BindingIO      `xml:"output>body"`
+	Faults      []*BindingFault `xml:"fault"`
+}
+
+// BindingFault describes a fault binding for a SOAP operation.
+type BindingFault struct {
+	Name string     `xml:"name,attr"`
+	Body *BindingIO `xml:"body"`
 }
 
 // SOAP12Operation describes a SOAP 1.2 operation. The soap12 namespace is

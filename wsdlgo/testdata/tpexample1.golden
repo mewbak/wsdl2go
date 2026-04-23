@@ -3,6 +3,8 @@
 package hello_binding
 
 import (
+	"context"
+
 	"github.com/fiorix/wsdl2go/soap"
 )
 
@@ -19,6 +21,8 @@ func NewHello_PortType(cli *soap.Client) Hello_PortType {
 type Hello_PortType interface {
 	// SayHello was auto-generated from WSDL.
 	SayHello(firstName string) (string, error)
+	// SayHello was auto-generated from WSDL.
+	SayHelloContext(ctx context.Context, firstName string) (string, error)
 }
 
 // Operation wrapper for SayHello.
@@ -40,6 +44,10 @@ type hello_PortType struct {
 
 // SayHello was auto-generated from WSDL.
 func (p *hello_PortType) SayHello(firstName string) (string, error) {
+	return p.SayHelloContext(context.Background(), firstName)
+}
+
+func (p *hello_PortType) SayHelloContext(ctx context.Context, firstName string) (string, error) {
 	α := struct {
 		M OperationSayHelloRequest `xml:"tns:sayHello"`
 	}{
@@ -51,7 +59,7 @@ func (p *hello_PortType) SayHello(firstName string) (string, error) {
 	γ := struct {
 		M OperationSayHelloResponse `xml:"sayHelloResponse"`
 	}{}
-	if err := p.cli.RoundTripWithAction("sayHello", α, &γ); err != nil {
+	if err := p.cli.RoundTripWithActionContext(ctx, "sayHello", α, &γ); err != nil {
 		return "", err
 	}
 	return *γ.M.Greeting, nil

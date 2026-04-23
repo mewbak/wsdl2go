@@ -9,9 +9,22 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strings"
 
 	"golang.org/x/net/html/charset"
 )
+
+// Fault represents a SOAP fault returned by the server.
+type Fault struct {
+	Code   string `xml:"faultcode"`
+	String string `xml:"faultstring"`
+	Actor  string `xml:"faultactor,omitempty"`
+	Detail string `xml:"detail,omitempty"`
+}
+
+func (f *Fault) Error() string {
+	return fmt.Sprintf("soap fault: %s: %s", f.Code, f.String)
+}
 
 // XSINamespace is a link to the XML Schema instance namespace.
 const XSINamespace = "http://www.w3.org/2001/XMLSchema-instance"
@@ -57,6 +70,7 @@ type Client struct {
 	Pre                    func(*http.Request)  // Optional hook to modify outbound requests
 	Post                   func(*http.Response) // Optional hook to snoop inbound responses
 	Ctx                    context.Context      // Optional variable to allow Context Tracking.
+	MTOM                   bool                 // Use MTOM/XOP for binary content
 }
 
 // XMLTyper is an abstract interface for types that can set an XML type.
@@ -95,7 +109,7 @@ func setXMLType(v reflect.Value) {
 	}
 }
 
-func doRoundTrip(c *Client, setHeaders func(*http.Request), in, out Message) error {
+func doRoundTrip(ctx context.Context, c *Client, setHeaders func(*http.Request), in, out Message) error {
 	setXMLType(reflect.ValueOf(in))
 	req := &Envelope{
 		EnvelopeAttr: c.Envelope,
@@ -116,16 +130,39 @@ func doRoundTrip(c *Client, setHeaders func(*http.Request), in, out Message) err
 	if req.TNSAttr == "" {
 		req.TNSAttr = req.NSAttr
 	}
-	var b bytes.Buffer
-	err := xml.NewEncoder(&b).Encode(req)
+	var envBuf bytes.Buffer
+	err := xml.NewEncoder(&envBuf).Encode(req)
 	if err != nil {
 		return err
 	}
+
 	cli := c.Config
 	if cli == nil {
 		cli = http.DefaultClient
 	}
-	r, err := http.NewRequest("POST", c.URL, &b)
+
+	var reqBody io.Reader
+	if c.MTOM {
+		ct := c.ContentType
+		if ct == "" {
+			ct = "text/xml"
+		}
+		mtomBody, mtomCT, err := mtomEncode(envBuf.Bytes(), ct)
+		if err != nil {
+			return err
+		}
+		reqBody = bytes.NewReader(mtomBody)
+		// Override setHeaders to use the MTOM content type.
+		origSetHeaders := setHeaders
+		setHeaders = func(r *http.Request) {
+			origSetHeaders(r)
+			r.Header.Set("Content-Type", mtomCT)
+		}
+	} else {
+		reqBody = &envBuf
+	}
+
+	r, err := http.NewRequest("POST", c.URL, reqBody)
 	if err != nil {
 		return err
 	}
@@ -134,9 +171,7 @@ func doRoundTrip(c *Client, setHeaders func(*http.Request), in, out Message) err
 		c.Pre(r)
 	}
 
-	if c.Ctx != nil {
-		r = r.WithContext(c.Ctx)
-	}
+	r = r.WithContext(ctx)
 
 	resp, err := cli.Do(r)
 	if err != nil {
@@ -146,10 +181,29 @@ func doRoundTrip(c *Client, setHeaders func(*http.Request), in, out Message) err
 	if c.Post != nil {
 		c.Post(resp)
 	}
+	// Buffer the response body so we can inspect it for faults.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+	if err != nil {
+		return err
+	}
+
+	// Check for SOAP fault: HTTP 500 is the standard fault status,
+	// but some servers return faults with HTTP 200.
+	if resp.StatusCode == http.StatusInternalServerError || bytes.Contains(body, []byte("Fault>")) {
+		var faultEnv struct {
+			XMLName xml.Name `xml:"Envelope"`
+			Body    struct {
+				Fault *Fault `xml:"Fault"`
+			} `xml:"Body"`
+		}
+		decoder := xml.NewDecoder(bytes.NewReader(body))
+		decoder.CharsetReader = charset.NewReaderLabel
+		if err := decoder.Decode(&faultEnv); err == nil && faultEnv.Body.Fault != nil {
+			return faultEnv.Body.Fault
+		}
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		// read only the first MiB of the body in error case
-		limReader := io.LimitReader(resp.Body, 1024*1024)
-		body, _ := io.ReadAll(limReader)
 		return &HTTPError{
 			StatusCode: resp.StatusCode,
 			Status:     resp.Status,
@@ -157,18 +211,36 @@ func doRoundTrip(c *Client, setHeaders func(*http.Request), in, out Message) err
 		}
 	}
 
+	// Check if response is MTOM.
+	respCT := resp.Header.Get("Content-Type")
+	if strings.Contains(respCT, "application/xop+xml") || strings.Contains(respCT, "multipart/related") {
+		return mtomDecode(bytes.NewReader(body), respCT, out)
+	}
+
 	marshalStructure := struct {
 		XMLName xml.Name `xml:"Envelope"`
 		Body    Message
 	}{Body: out}
 
-	decoder := xml.NewDecoder(resp.Body)
+	decoder := xml.NewDecoder(bytes.NewReader(body))
 	decoder.CharsetReader = charset.NewReaderLabel
 	return decoder.Decode(&marshalStructure)
 }
 
+func (c *Client) ctx() context.Context {
+	if c.Ctx != nil {
+		return c.Ctx
+	}
+	return context.Background()
+}
+
 // RoundTrip implements the RoundTripper interface.
 func (c *Client) RoundTrip(in, out Message) error {
+	return c.RoundTripContext(c.ctx(), in, out)
+}
+
+// RoundTripContext is like RoundTrip but with an explicit context.
+func (c *Client) RoundTripContext(ctx context.Context, in, out Message) error {
 	headerFunc := func(r *http.Request) {
 		if c.UserAgent != "" {
 			r.Header.Add("User-Agent", c.UserAgent)
@@ -191,12 +263,17 @@ func (c *Client) RoundTrip(in, out Message) error {
 			r.Header.Add("SOAPAction", fmt.Sprintf("%q", actionName))
 		}
 	}
-	return doRoundTrip(c, headerFunc, in, out)
+	return doRoundTrip(ctx, c, headerFunc, in, out)
 }
 
 // RoundTripWithAction implements the RoundTripper interface for SOAP clients
 // that need to set the SOAPAction header.
 func (c *Client) RoundTripWithAction(soapAction string, in, out Message) error {
+	return c.RoundTripWithActionContext(c.ctx(), soapAction, in, out)
+}
+
+// RoundTripWithActionContext is like RoundTripWithAction but with an explicit context.
+func (c *Client) RoundTripWithActionContext(ctx context.Context, soapAction string, in, out Message) error {
 	headerFunc := func(r *http.Request) {
 		if c.UserAgent != "" {
 			r.Header.Add("User-Agent", c.UserAgent)
@@ -216,15 +293,135 @@ func (c *Client) RoundTripWithAction(soapAction string, in, out Message) error {
 			r.Header.Add("SOAPAction", fmt.Sprintf("%q", actionName))
 		}
 	}
-	return doRoundTrip(c, headerFunc, in, out)
+	return doRoundTrip(ctx, c, headerFunc, in, out)
 }
 
 // RoundTripSoap12 implements the RoundTripper interface for SOAP 1.2.
 func (c *Client) RoundTripSoap12(action string, in, out Message) error {
+	return c.RoundTripSoap12Context(c.ctx(), action, in, out)
+}
+
+// RoundTripSoap12Context is like RoundTripSoap12 but with an explicit context.
+func (c *Client) RoundTripSoap12Context(ctx context.Context, action string, in, out Message) error {
 	headerFunc := func(r *http.Request) {
 		r.Header.Add("Content-Type", fmt.Sprintf("application/soap+xml; charset=utf-8; action=\"%s\"", action))
 	}
-	return doRoundTrip(c, headerFunc, in, out)
+	return doRoundTrip(ctx, c, headerFunc, in, out)
+}
+
+// RoundTripMIME sends a SOAP request with MIME attachments and returns
+// any attachments from the response.
+func (c *Client) RoundTripMIME(soapAction string, in, out Message, attachments []Attachment) ([]Attachment, error) {
+	setXMLType(reflect.ValueOf(in))
+	req := &Envelope{
+		EnvelopeAttr: c.Envelope,
+		URNAttr:      c.URNamespace,
+		NSAttr:       c.Namespace,
+		TNSAttr:      c.ThisNamespace,
+		XSIAttr:      XSINamespace,
+		Header:       c.Header,
+		Body:         in,
+	}
+	if req.EnvelopeAttr == "" {
+		req.EnvelopeAttr = "http://schemas.xmlsoap.org/soap/envelope/"
+	}
+	if req.NSAttr == "" {
+		req.NSAttr = c.URL
+	}
+	if req.TNSAttr == "" {
+		req.TNSAttr = req.NSAttr
+	}
+	var envBuf bytes.Buffer
+	if err := xml.NewEncoder(&envBuf).Encode(req); err != nil {
+		return nil, err
+	}
+
+	ct := c.ContentType
+	if ct == "" {
+		ct = "text/xml"
+	}
+	mimeBody, mimeContentType, err := mimeEncode(envBuf.Bytes(), ct, attachments)
+	if err != nil {
+		return nil, err
+	}
+
+	cli := c.Config
+	if cli == nil {
+		cli = http.DefaultClient
+	}
+	r, err := http.NewRequest("POST", c.URL, bytes.NewReader(mimeBody))
+	if err != nil {
+		return nil, err
+	}
+	r.Header.Set("Content-Type", mimeContentType)
+	if soapAction != "" {
+		var actionName string
+		if c.ExcludeActionNamespace {
+			actionName = soapAction
+		} else {
+			actionName = fmt.Sprintf("%s/%s", c.Namespace, soapAction)
+		}
+		r.Header.Add("SOAPAction", fmt.Sprintf("%q", actionName))
+	}
+	if c.UserAgent != "" {
+		r.Header.Add("User-Agent", c.UserAgent)
+	}
+	if c.Pre != nil {
+		c.Pre(r)
+	}
+	r = r.WithContext(c.ctx())
+
+	resp, err := cli.Do(r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if c.Post != nil {
+		c.Post(resp)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+	if err != nil {
+		return nil, err
+	}
+
+	// Check for SOAP fault.
+	if resp.StatusCode == http.StatusInternalServerError || bytes.Contains(body, []byte("Fault>")) {
+		var faultEnv struct {
+			XMLName xml.Name `xml:"Envelope"`
+			Body    struct {
+				Fault *Fault `xml:"Fault"`
+			} `xml:"Body"`
+		}
+		decoder := xml.NewDecoder(bytes.NewReader(body))
+		decoder.CharsetReader = charset.NewReaderLabel
+		if err := decoder.Decode(&faultEnv); err == nil && faultEnv.Body.Fault != nil {
+			return nil, faultEnv.Body.Fault
+		}
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, &HTTPError{
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			Msg:        string(body),
+		}
+	}
+
+	// Check if response is multipart.
+	respCT := resp.Header.Get("Content-Type")
+	if strings.HasPrefix(respCT, "multipart/related") {
+		return mimeDecode(bytes.NewReader(body), respCT, out)
+	}
+
+	// Plain SOAP response.
+	marshalStructure := struct {
+		XMLName xml.Name `xml:"Envelope"`
+		Body    Message
+	}{Body: out}
+	decoder := xml.NewDecoder(bytes.NewReader(body))
+	decoder.CharsetReader = charset.NewReaderLabel
+	return nil, decoder.Decode(&marshalStructure)
 }
 
 // HTTPError is detailed soap http error

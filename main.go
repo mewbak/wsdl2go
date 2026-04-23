@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 
 	"github.com/fiorix/wsdl2go/wsdl"
 	"github.com/fiorix/wsdl2go/wsdlgo"
@@ -22,6 +23,7 @@ type options struct {
 	Package        string
 	Namespace      string
 	Insecure       bool
+	NoCache        bool
 	ClientCertFile string
 	ClientKeyFile  string
 	Version        bool
@@ -35,6 +37,7 @@ func main() {
 	flag.StringVar(&opts.Namespace, "n", opts.Namespace, "override namespace")
 	flag.StringVar(&opts.Package, "p", opts.Package, "package name")
 	flag.BoolVar(&opts.Insecure, "yolo", opts.Insecure, "accept invalid https certificates")
+	flag.BoolVar(&opts.NoCache, "no-cache", opts.NoCache, "disable schema download cache")
 	flag.StringVar(&opts.ClientCertFile, "cert", opts.ClientCertFile, "use client TLS cert file")
 	flag.StringVar(&opts.ClientKeyFile, "key", opts.ClientKeyFile, "use client TLS key file")
 	flag.BoolVar(&opts.Version, "version", opts.Version, "show version and exit")
@@ -85,6 +88,9 @@ func codegen(w io.Writer, opts options, cli *http.Client) error {
 	}
 	if opts.Namespace != "" {
 		enc.SetLocalNamespace(opts.Namespace)
+	}
+	if !opts.NoCache {
+		enc.SetCacheDir(filepath.Join(os.TempDir(), "wsdl2go-cache"))
 	}
 
 	return enc.Encode(d)

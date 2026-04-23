@@ -3,6 +3,8 @@
 package testsoap12binding
 
 import (
+	"context"
+
 	"github.com/fiorix/wsdl2go/soap"
 )
 
@@ -19,6 +21,8 @@ func NewTest(cli *soap.Client) Test {
 type Test interface {
 	// HelloWorld was auto-generated from WSDL.
 	HelloWorld(HelloRequest string) (string, error)
+	// HelloWorld was auto-generated from WSDL.
+	HelloWorldContext(ctx context.Context, HelloRequest string) (string, error)
 }
 
 // Operation wrapper for HelloWorld.
@@ -40,6 +44,10 @@ type test struct {
 
 // HelloWorld was auto-generated from WSDL.
 func (p *test) HelloWorld(HelloRequest string) (string, error) {
+	return p.HelloWorldContext(context.Background(), HelloRequest)
+}
+
+func (p *test) HelloWorldContext(ctx context.Context, HelloRequest string) (string, error) {
 	α := struct {
 		OperationHelloWorldMessageIn `xml:"tns:HelloWorld"`
 	}{
@@ -51,7 +59,7 @@ func (p *test) HelloWorld(HelloRequest string) (string, error) {
 	γ := struct {
 		OperationHelloWorldMessageOut `xml:"HelloWorldResponse"`
 	}{}
-	if err := p.cli.RoundTripSoap12("http://example.com/Test/HelloWorldRequest", α, &γ); err != nil {
+	if err := p.cli.RoundTripSoap12Context(ctx, "http://example.com/Test/HelloWorldRequest", α, &γ); err != nil {
 		return "", err
 	}
 	return *γ.HelloResponse, nil

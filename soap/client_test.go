@@ -1,6 +1,7 @@
 package soap
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -259,5 +260,105 @@ func TestRoundTripSoap12(t *testing.T) {
 				i, tc.In, &env.msgT)
 			continue
 		}
+	}
+}
+
+func TestFaultHTTP500(t *testing.T) {
+	faultXML := `<?xml version="1.0"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">
+  <SOAP-ENV:Body>
+    <SOAP-ENV:Fault>
+      <faultcode>SOAP-ENV:Server</faultcode>
+      <faultstring>Server error</faultstring>
+      <faultactor>http://example.com/actor</faultactor>
+      <detail>something broke</detail>
+    </SOAP-ENV:Fault>
+  </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(faultXML))
+	}))
+	defer srv.Close()
+
+	c := &Client{URL: srv.URL}
+	type respT struct{}
+	var out respT
+	err := c.RoundTrip(nil, &out)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var f *Fault
+	if !errors.As(err, &f) {
+		t.Fatalf("expected *Fault, got %T: %v", err, err)
+	}
+	if f.Code != "SOAP-ENV:Server" {
+		t.Errorf("fault code: want %q, have %q", "SOAP-ENV:Server", f.Code)
+	}
+	if f.String != "Server error" {
+		t.Errorf("fault string: want %q, have %q", "Server error", f.String)
+	}
+	if f.Actor != "http://example.com/actor" {
+		t.Errorf("fault actor: want %q, have %q", "http://example.com/actor", f.Actor)
+	}
+	if f.Detail != "something broke" {
+		t.Errorf("fault detail: want %q, have %q", "something broke", f.Detail)
+	}
+}
+
+func TestFaultHTTP200(t *testing.T) {
+	faultXML := `<?xml version="1.0"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">
+  <SOAP-ENV:Body>
+    <SOAP-ENV:Fault>
+      <faultcode>SOAP-ENV:Client</faultcode>
+      <faultstring>Invalid request</faultstring>
+    </SOAP-ENV:Fault>
+  </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(faultXML))
+	}))
+	defer srv.Close()
+
+	c := &Client{URL: srv.URL}
+	type respT struct{}
+	var out respT
+	err := c.RoundTrip(nil, &out)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var f *Fault
+	if !errors.As(err, &f) {
+		t.Fatalf("expected *Fault, got %T: %v", err, err)
+	}
+	if f.Code != "SOAP-ENV:Client" {
+		t.Errorf("fault code: want %q, have %q", "SOAP-ENV:Client", f.Code)
+	}
+}
+
+func TestHTTPErrorNonFault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte("bad gateway"))
+	}))
+	defer srv.Close()
+
+	c := &Client{URL: srv.URL}
+	type respT struct{}
+	var out respT
+	err := c.RoundTrip(nil, &out)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("expected *HTTPError, got %T: %v", err, err)
+	}
+	if httpErr.StatusCode != http.StatusBadGateway {
+		t.Errorf("status: want %d, have %d", http.StatusBadGateway, httpErr.StatusCode)
 	}
 }
