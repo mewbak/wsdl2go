@@ -1,0 +1,41 @@
+version: 2
+
+project_name: wsdl2go
+
+builds:
+  - main: .
+    binary: wsdl2go
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+nfpms:
+  - vendor: fiorix
+    homepage: https://github.com/fiorix/wsdl2go
+    maintainer: Alexandre Fiori
+    description: Generate Go code from WSDL
+    license: Apache-2.0
+    formats:
+      - deb
+      - rpm
+      - archlinux
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github-native
