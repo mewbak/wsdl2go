@@ -1705,6 +1705,9 @@ func (ge *goEncoder) genElementField(w io.Writer, el *wsdl.Element) {
 		}
 	}
 	et := el.Type
+	if et == "" && el.SimpleType != nil && el.SimpleType.Restriction != nil {
+		et = el.SimpleType.Restriction.Base
+	}
 	if et == "" {
 		et = "string"
 	}

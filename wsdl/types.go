@@ -195,6 +195,7 @@ type Element struct {
 	Max         string       `xml:"maxOccurs,attr"` // can be # or unbounded
 	Nillable    bool         `xml:"nillable,attr"`
 	ComplexType *ComplexType `xml:"complexType"`
+	SimpleType  *SimpleType  `xml:"simpleType"`
 }
 
 // AnyElement describes an element of an undefined type.
